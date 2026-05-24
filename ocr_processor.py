@@ -11,10 +11,8 @@ import argparse
 import time
 
 def extract_page_number(filename: str) -> int:
-    """
-    Extracts the trailing numeric page number from a filename for sorting.
-    Example: '台灣AI大未來 - 100.jpg' -> 100
-    """
+    """Extract trailing numeric page number for sorting.
+    Example: '台灣AI大未來 - 100.jpg' -> 100"""
     base = os.path.splitext(filename)[0]
     match = re.findall(r'\d+', base)
     if match:
@@ -22,14 +20,16 @@ def extract_page_number(filename: str) -> int:
     return 999999
 
 def clean_ocr_text(text: str) -> str:
+    """Clean OCR output:
+    - Remove markdown code block markers.
+    - Strip typical chatbot preambles.
+    - Remove e‑reader status bar noise (time, battery, UI tokens).
+    - Remove stray single‑line noise like "A4".
     """
-    Cleans up OCR markdown markers, preambles, and e-reader top/bottom status bars.
-    """
-    # 1. Clean markdown code blocks
+    # 1. Remove markdown code block fences
     text = re.sub(r'^```[a-zA-Z]*\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\n```$', '', text, flags=re.MULTILINE)
-    
-    # 2. Clean chatbot introductory phrases
+    # 2. Remove common chatbot intro phrases
     intro_phrases = [
         r'^\s*Here is the extracted text.*:\s*$',
         r'^\s*Extracted text.*:\s*$',
@@ -38,228 +38,192 @@ def clean_ocr_text(text: str) -> str:
     ]
     for phrase in intro_phrases:
         text = re.sub(phrase, '', text, flags=re.IGNORECASE | re.MULTILINE)
-
-    # 3. Clean status bars (time, battery, UI elements)
+    # 3. Remove status‑bar noise (time, battery, UI tokens) – only in top/bottom lines
     lines = text.split('\n')
     cleaned_lines = []
-    
     time_pattern = re.compile(r'^\s*(AM|PM)?\s*\d{1,2}:\d{2}\s*$', re.IGNORECASE)
     battery_pattern = re.compile(r'^\s*\d{1,3}%\s*$')
     ui_pattern = re.compile(r'^\s*(AA|[‹›<>|])\s*$', re.IGNORECASE)
-    
+    a4_pattern = re.compile(r'^\s*A4\s*$', re.IGNORECASE)  # NEW: single line "A4"
     for i, line in enumerate(lines):
-        # We only check for status bar noise at the very top (first 5 lines) or very bottom (last 5 lines)
         is_top_or_bottom = (i < 5) or (i >= len(lines) - 5)
         stripped = line.strip()
-        
         if is_top_or_bottom:
-            if time_pattern.match(stripped) or battery_pattern.match(stripped) or ui_pattern.match(stripped):
-                continue # Skip this line
-        
+            if (time_pattern.match(stripped) or battery_pattern.match(stripped) or
+                ui_pattern.match(stripped) or a4_pattern.match(stripped)):
+                continue  # drop this line
         cleaned_lines.append(line)
-        
-    result = '\n'.join(cleaned_lines)
-    return result.strip()
+    result = '\n'.join(cleaned_lines).strip()
+    return result
 
-def perform_ocr_with_api(image_path: str, timeout: int) -> str:
-    """
-    Directly calls the local Ollama HTTP API endpoint to perform OCR.
-    """
+def perform_ocr_with_api(image_path: str, timeout: float = None) -> str:
+    """Call Ollama HTTP API for deepseek-ocr.
+    Returns the raw OCR text (may contain markdown etc.)."""
     with open(image_path, "rb") as f:
         img_data = base64.b64encode(f.read()).decode('utf-8')
-    
     payload = {
         "model": "deepseek-ocr",
         "prompt": "Extract the text in the image.",
         "images": [img_data],
         "stream": False
     }
-    
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(
         "http://localhost:11434/api/generate",
         data=data,
         headers={"Content-Type": "application/json"}
     )
-    
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
             res = json.loads(response.read().decode('utf-8'))
             return res.get("response", "")
     except (urllib.error.URLError, socket.timeout) as e:
-        raise TimeoutError(f"Ollama API request timed out or was unreachable: {e}")
+        raise TimeoutError(f"Ollama API request timed out or unreachable: {e}")
 
 def run_unit_tests():
-    """
-    Runs self-contained unit tests to verify sorting and filtering logic.
-    """
-    print("🧪 Running unit tests...")
-    
-    # Test Sorting
-    print("  - Testing page number extraction and sorting...")
-    test_files = ["台灣AI大未來 - 10.jpg", "台灣AI大未來 - 2.jpg", "台灣AI大未來 - 100.jpg", "台灣AI大未來 - 1.jpg"]
+    """Simple unit tests for sorting and noise filtering."""
+    print("🧪 Running unit tests…")
+    # Sorting test
+    test_files = ["台灣AI大未來 - 10.jpg", "台灣AI大未來 - 2.jpg",
+                  "台灣AI大未來 - 100.jpg", "台灣AI大未來 - 1.jpg"]
     sorted_files = sorted(test_files, key=extract_page_number)
-    expected_sorted = ["台灣AI大未來 - 1.jpg", "台灣AI大未來 - 2.jpg", "台灣AI大未來 - 10.jpg", "台灣AI大未來 - 100.jpg"]
-    assert sorted_files == expected_sorted, f"Sorting failed. Got: {sorted_files}"
-    print("    [PASS] Filename sorting works correctly!")
-    
-    # Test Cleanup
-    print("  - Testing text cleanup and filtering...")
-    raw_ocr_output = """```markdown
-AM2:07
-73%
-AA
-技術視角，見證這波生成式AI如何覆舊有的AI思潮流。
-
-那時，我們還在懷疑AI的對話能力。
-```"""
-    cleaned = clean_ocr_text(raw_ocr_output)
-    expected_cleaned = "技術視角，見證這波生成式AI如何覆舊有的AI思潮流。\n\n那時，我們還在懷疑AI的對話能力。"
-    assert cleaned == expected_cleaned, f"Cleanup failed. Got:\n{cleaned}"
-    print("    [PASS] Text cleanup and filtering works correctly!")
-    
-    print("🎉 All unit tests passed successfully!\n")
+    expected = ["台灣AI大未來 - 1.jpg", "台灣AI大未來 - 2.jpg",
+                "台灣AI大未來 - 10.jpg", "台灣AI大未來 - 100.jpg"]
+    assert sorted_files == expected, f"Sorting failed: {sorted_files}"
+    print("   [PASS] Filename sorting works.")
+    # Noise filtering test – includes the new "A4" line
+    raw = """```markdown\nAM2:07\n73%\nAA\nA4\n技術視角，見證這波生成式AI如何覆舊有的AI思潮流。\n```"""
+    cleaned = clean_ocr_text(raw)
+    expected_clean = "技術視角，見證這波生成式AI如何覆舊有的AI思潮流。"
+    assert cleaned == expected_clean, f"Cleanup failed: {cleaned}"
+    print("   [PASS] Noise filtering (including A4) works.")
+    print("🎉 All unit tests passed!\n")
 
 def merge_texts(book_id: str, out_txt_dir: str, sorted_filenames: list, final_out_path: str):
-    """
-    Combines all single page text files in numeric order into a single final document.
-    """
-    print(f"\nMerging all page texts into {final_out_path}...")
-    merged_content = []
-    
+    """Combine per‑page .txt files into a single book file."""
+    print(f"\nMerging texts into {final_out_path}…")
+    merged = []
     for filename in sorted_filenames:
-        base_name = os.path.splitext(filename)[0]
-        page_txt_path = os.path.join(out_txt_dir, f"{base_name}.txt")
-        
-        if os.path.exists(page_txt_path):
-            with open(page_txt_path, "r", encoding="utf-8") as f:
+        base = os.path.splitext(filename)[0]
+        page_path = os.path.join(out_txt_dir, f"{base}.txt")
+        if os.path.exists(page_path):
+            with open(page_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
                 if content:
-                    merged_content.append(content)
+                    merged.append(content)
         else:
-            print(f"Warning: Missing text file for page {filename}")
-            
-    combined = "\n\n".join(merged_content)
-    
+            print(f"⚠️ Missing text file for page {filename}")
     with open(final_out_path, "w", encoding="utf-8") as f:
-        f.write(combined)
-    print(f"✨ Merged successfully! Combined file saved at: {final_out_path}")
+        f.write("\n\n".join(merged))
+    print(f"✅ Merged successfully! Output saved at: {final_out_path}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Scanned Book OCR Processor & Integrator using Ollama API")
-    parser.add_argument("book_id", type=str, help="The ID of the book (e.g., B001, B002)")
-    parser.add_argument("-l", "--limit", type=int, default=None, help="Limit the number of pages to process in this run")
-    parser.add_argument("-t", "--timeout", type=int, default=180, help="Timeout in seconds for OCR request (default: 180)")
-    parser.add_argument("--scan-dir", type=str, default="SCAN_PAGES", help="Base directory for scanned images")
-    parser.add_argument("--out-dir", type=str, default="TXT", help="Base directory for output text files")
-    parser.add_argument("--test", action="store_true", help="Run self-contained unit tests and exit")
-    
+    parser = argparse.ArgumentParser(description="Scanned Book OCR Processor (Ollama API)")
+    parser.add_argument("book_id", type=str, help="Book identifier, e.g. B001")
+    parser.add_argument("-l", "--limit", type=int, default=None,
+                        help="Process only N pages (useful for testing)")
+    parser.add_argument("-t", "--timeout", type=int, default=180,
+                        help="Timeout in seconds for each OCR request (default 180)")
+    parser.add_argument("--scan-dir", type=str, default="SCAN_PAGES",
+                        help="Base directory containing scanned images")
+    parser.add_argument("--out-dir", type=str, default="TXT",
+                        help="Base directory for per‑page text output")
+    parser.add_argument("--test", action="store_true",
+                        help="Run internal unit tests and exit")
     args = parser.parse_args()
-    
+
     if args.test:
         run_unit_tests()
         sys.exit(0)
-        
-    book_id = args.book_id
-    scan_base = args.scan_dir
-    out_base = args.out_dir
-    timeout = args.timeout
-    
-    if not os.path.exists(scan_base):
-        print(f"Error: Base directory '{scan_base}' does not exist.")
+
+    # Locate the correct book folder inside SCAN_PAGES
+    if not os.path.isdir(args.scan_dir):
+        print(f"❌ Scan directory '{args.scan_dir}' not found.")
         sys.exit(1)
-        
-    # Find matching directory for the book ID (e.g. B001_台灣AI大未來)
-    matching_dirs = [d for d in os.listdir(scan_base) if d.startswith(book_id) and os.path.isdir(os.path.join(scan_base, d))]
-    if not matching_dirs:
-        print(f"Error: No directory found starting with '{book_id}' in '{scan_base}'.")
+    matching = [d for d in os.listdir(args.scan_dir)
+                if d.startswith(args.book_id) and os.path.isdir(os.path.join(args.scan_dir, d))]
+    if not matching:
+        print(f"❌ No folder starting with '{args.book_id}' found in {args.scan_dir}.")
         sys.exit(1)
-        
-    book_dir_name = matching_dirs[0]
-    book_dir_path = os.path.join(scan_base, book_dir_name)
-    print(f"📂 Found book directory: {book_dir_path}")
-    
-    # Gather image files
-    valid_extensions = ('.jpg', '.jpeg', '.png')
-    all_images = [f for f in os.listdir(book_dir_path) if f.lower().endswith(valid_extensions)]
-    
-    if not all_images:
-        print(f"Error: No images found in directory '{book_dir_path}'.")
+    book_dir = os.path.join(args.scan_dir, matching[0])
+    print(f"📂 Found book folder: {book_dir}")
+
+    # Gather image files (jpg/jpeg/png)
+    valid_ext = ('.jpg', '.jpeg', '.png')
+    images = [f for f in os.listdir(book_dir) if f.lower().endswith(valid_ext)]
+    if not images:
+        print(f"❌ No image files in {book_dir}.")
         sys.exit(1)
-        
-    # Sort files numerically based on the trailing page number
-    all_images.sort(key=extract_page_number)
-    print(f"🔢 Detected {len(all_images)} scanned page images.")
-    
-    # Establish output paths
-    out_txt_dir = os.path.join(out_base, book_id)
-    os.makedirs(out_txt_dir, exist_ok=True)
-    
-    # Filter/Slice by limit if set
-    processed_count = 0
-    pages_to_process = []
-    
-    for img in all_images:
-        base_name = os.path.splitext(img)[0]
-        out_txt_path = os.path.join(out_txt_dir, f"{base_name}.txt")
-        
-        # If already processed, we skip it
-        if os.path.exists(out_txt_path):
-            continue
-            
-        pages_to_process.append(img)
-        if args.limit and len(pages_to_process) >= args.limit:
-            break
-            
-    print(f"⚡ {len(all_images) - len(pages_to_process)} pages already processed. {len(pages_to_process)} pages remaining to process.")
-    
-    total_to_process = len(pages_to_process)
-    
-    for idx, filename in enumerate(pages_to_process):
-        image_path = os.path.join(book_dir_path, filename)
-        base_name = os.path.splitext(filename)[0]
-        out_txt_path = os.path.join(out_txt_dir, f"{base_name}.txt")
-        
-        # Keep retrying until success (in case of Ollama hangs)
+    images.sort(key=extract_page_number)
+    print(f"🔢 Detected {len(images)} image files.")
+
+    # Prepare output folder
+    out_folder = os.path.join(args.out_dir, args.book_id)
+    os.makedirs(out_folder, exist_ok=True)
+
+    # Apply limit if given
+    if args.limit is not None:
+        images = images[:args.limit]
+        print(f"🚦 Limiting to first {args.limit} pages for this run.")
+
+    processed = 0
+    first_page_time = None  # Track the processing time of the first successfully completed OCR page in this run
+    for idx, img_name in enumerate(images, start=1):
+        img_path = os.path.join(book_dir, img_name)
+        base_name = os.path.splitext(img_name)[0]
+        out_txt = os.path.join(out_folder, f"{base_name}.txt")
+        # If the output .txt already exists, ask whether to regenerate
+        if os.path.exists(out_txt):
+            overwrite = False
+            while True:
+                resp = input(f"⚠️ Text file '{out_txt}' already exists. Overwrite? [y/n]: ").strip().lower()
+                if resp in ('y', 'yes'):
+                    overwrite = True
+                    break
+                elif resp in ('n', 'no'):
+                    print(f"⏭️ Skipping page '{img_name}'.")
+                    break
+                else:
+                    print("Please answer 'y' or 'n'.")
+            if not overwrite:
+                continue
+
+        # Proceed with OCR processing for this page
         while True:
             try:
-                print(f"📖 [{idx+1}/{total_to_process}] Processing '{filename}'...")
-                start_time = time.time()
-                
-                # Perform OCR
-                raw_text = perform_ocr_with_api(image_path, timeout)
-                
-                elapsed = time.time() - start_time
-                print(f"    ✅ Success! OCR finished in {elapsed:.2f} seconds.")
-                
-                # Clean and filter text
-                cleaned_text = clean_ocr_text(raw_text)
-                
-                # Save individual page text
-                with open(out_txt_path, "w", encoding="utf-8") as f:
-                    f.write(cleaned_text)
-                
-                processed_count += 1
-                break # Break inner retry loop on success
-                
+                if first_page_time is None:
+                    print(f"📖 [{idx}/{len(images)}] Processing '{img_name}' (First page - No timeout limits)…")
+                    current_timeout = None
+                else:
+                    # Use 2x first page time, with a minimum of 120s to prevent false-positives on fast cache hits
+                    current_timeout = max(120.0, first_page_time * 2)
+                    print(f"📖 [{idx}/{len(images)}] Processing '{img_name}' (Adaptive timeout: {current_timeout:.1f}s)…")
+
+                start = time.time()
+                raw_text = perform_ocr_with_api(img_path, current_timeout)
+                elapsed = time.time() - start
+                print(f"   ⏱️ OCR completed in {elapsed:.2f} seconds.")
+
+                # Establish baseline from the first successfully processed page
+                if first_page_time is None:
+                    first_page_time = elapsed
+                    print(f"   ℹ️ First page baseline time set to {first_page_time:.2f}s. Subsequent timeouts: {first_page_time * 2:.2f}s.")
+
+                cleaned = clean_ocr_text(raw_text)
+                with open(out_txt, "w", encoding="utf-8") as f:
+                    f.write(cleaned)
+                processed += 1
+                break  # success, move to next page
             except (TimeoutError, Exception) as e:
-                print("\n" + "="*65)
-                print(f"🚨 [WARNING] OCR processing failed or timed out for '{filename}'!")
-                print(f"Error details: {e}")
-                print("\nThis might indicate that your local Ollama service is hung or offline.")
-                print("Please follow these steps to recover:")
-                print("  1. Check if Ollama is running.")
-                print("  2. Restart the Ollama application / server if necessary.")
-                print("  3. Make sure the 'deepseek-ocr' model is available.")
-                print("="*65)
-                print("\a", end="") # Sound terminal bell
-                input("\n👉 Once Ollama is running correctly, press [Enter] to retry this page...")
-                print("🔄 Retrying page OCR...")
-                
-    # Finally, merge all text files of the book in numeric order
-    final_out_path = os.path.join(".", f"{book_id}.txt")
-    merge_texts(book_id, out_txt_dir, all_images, final_out_path)
-    print(f"\n🎉 Process finished! {processed_count} new pages processed.")
+                print("\n🚨 OCR failed or timed out!", e)
+                print("Please ensure Ollama is running, then press [Enter] to retry this page…")
+                input()
+                print("🔁 Retrying…")
+
+    # Merge all pages (including those already existed)
+    final_path = os.path.join(".", f"{args.book_id}.txt")
+    merge_texts(args.book_id, out_folder, images, final_path)
+    print(f"\n🎉 Finished! Processed {processed} new pages. Combined book: {final_path}")
 
 if __name__ == "__main__":
     main()
