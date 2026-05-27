@@ -56,16 +56,79 @@ def clean_ocr_text(text: str) -> str:
     result = '\n'.join(cleaned_lines).strip()
     return result
 
-def perform_ocr_with_api(image_path: str, timeout: float = None) -> str:
+def has_repetition_loop(text: str, max_detect_len: int = 30, min_repeats: int = 5) -> bool:
+    """Detect if the end of the text has a repeating substring pattern."""
+    for l in range(2, max_detect_len + 1):
+        if len(text) < l * min_repeats:
+            continue
+        pattern = text[-l:]
+        is_loop = True
+        for r in range(1, min_repeats):
+            start_idx = -l * (r + 1)
+            end_idx = -l * r
+            if text[start_idx:end_idx] != pattern:
+                is_loop = False
+                break
+        if is_loop:
+            return True
+    return False
+
+def is_garbage_text(text: str) -> tuple[bool, str]:
+    """Detect whether the OCR output is clearly not a real article.
+    Returns (is_garbage, reason_string).
+    Checks performed:
+      1. Bounding-box / grounding tokens (e.g. <|ref|>...<|det|>[[...]])
+      2. Indexed numbered repetitions (e.g. ま[1] ま[2] ま[3]...)
+      3. Content is entirely non-Chinese (English hallucinations) for a Chinese book
+      4. Extremely short content (< 10 meaningful characters after stripping)
+    """
+    if not text or not text.strip():
+        return True, "辨識結果為空"
+
+    stripped = text.strip()
+
+    # 1. Bounding-box / grounding tokens produced by vision model
+    if re.search(r'<\|ref\|>|<\|det\|>|\[\[\d+,\s*\d+', stripped):
+        return True, "偵測到 Bounding-box / Grounding 定位標記（模型將任務誤解為物體偵測）"
+
+    # 2. Indexed repetition pattern: any character/token repeated with ascending numbers [1] [2] [3]...
+    #    Match sequences of 5+ occurrences of (token[N]) consecutively
+    if re.search(r'(.)\[\d+\](?:\s*\1\[\d+\]){4,}', stripped):
+        return True, "偵測到索引型重複序列（例如：ま[1] ま[2] ま[3]...），辨識結果明顯不是正常文章"
+
+    # 3. Detect if text has far more English sentences than Chinese characters
+    #    Chinese Unicode range: \u4e00-\u9fff, CJK Extension A/B etc.
+    chinese_chars = len(re.findall(r'[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]', stripped))
+    total_alpha = len(re.findall(r'[a-zA-Z]', stripped))
+    total_meaningful = len(re.findall(r'[^\s\n\r]', stripped))
+
+    if total_meaningful > 20 and chinese_chars == 0 and total_alpha > 20:
+        return True, "辨識結果為純英文（無任何中文字），疑似模型幻覺或圖片載入失敗"
+
+    if total_meaningful > 30 and chinese_chars > 0 and total_alpha / max(chinese_chars, 1) > 5:
+        return True, f"英文字母數量（{total_alpha}）遠超中文字數（{chinese_chars}），疑似模型描述圖片而非提取文字"
+
+    # 4. Extremely short meaningful content
+    if total_meaningful < 10:
+        return True, f"辨識結果過短（僅 {total_meaningful} 個有效字符），可能為空白頁或辨識失敗"
+
+    return False, ""
+
+def perform_ocr_with_api(image_path: str, timeout: float = None) -> tuple[str, bool]:
     """Call Ollama HTTP API for deepseek-ocr.
-    Returns the raw OCR text (may contain markdown etc.)."""
+    Returns a tuple of (raw OCR text, loop_detected flag)."""
     with open(image_path, "rb") as f:
         img_data = base64.b64encode(f.read()).decode('utf-8')
+    
     payload = {
         "model": "deepseek-ocr",
         "prompt": "Extract the text in the image.",
         "images": [img_data],
-        "stream": False
+        "stream": True,
+        "options": {
+            "temperature": 0.0,
+            "num_predict": 1024
+        }
     }
     data = json.dumps(payload).encode('utf-8')
     req = urllib.request.Request(
@@ -73,10 +136,25 @@ def perform_ocr_with_api(image_path: str, timeout: float = None) -> str:
         data=data,
         headers={"Content-Type": "application/json"}
     )
+    
+    accumulated_text = ""
+    loop_detected = False
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            res = json.loads(response.read().decode('utf-8'))
-            return res.get("response", "")
+            for line in response:
+                if line:
+                    chunk = json.loads(line.decode('utf-8'))
+                    res_text = chunk.get("response", "")
+                    accumulated_text += res_text
+                    
+                    if has_repetition_loop(accumulated_text):
+                        print("\n   [⚠️ Repetition loop detected! Breaking early to prevent timeout.]")
+                        loop_detected = True
+                        break
+                    
+                    if chunk.get("done", False):
+                        break
+        return accumulated_text, loop_detected
     except (urllib.error.URLError, socket.timeout) as e:
         raise TimeoutError(f"Ollama API request timed out or unreachable: {e}")
 
@@ -128,8 +206,12 @@ def main():
                         help="Base directory containing scanned images")
     parser.add_argument("--out-dir", type=str, default="TXT",
                         help="Base directory for per‑page text output")
+    parser.add_argument("--start", type=int, default=None,
+                        help="Start processing from this page number (e.g., 30 will begin with the image whose extracted page number >= 30).")
     parser.add_argument("--test", action="store_true",
                         help="Run internal unit tests and exit")
+    parser.add_argument("--rtl", action="store_true",
+                        help="Process vertical Chinese text (read from right to left)")
     args = parser.parse_args()
 
     if args.test:
@@ -157,6 +239,14 @@ def main():
     images.sort(key=extract_page_number)
     print(f"🔢 Detected {len(images)} image files.")
 
+    # Apply start page if given
+    if args.start is not None:
+        images = [img for img in images if extract_page_number(img) >= args.start]
+        if not images:
+            print(f"❌ No images found with page number >= {args.start}.")
+            sys.exit(1)
+        print(f"🚦 Starting from page {args.start}. Remaining pages: {len(images)}.")
+
     # Prepare output folder
     out_folder = os.path.join(args.out_dir, args.book_id)
     os.makedirs(out_folder, exist_ok=True)
@@ -168,6 +258,8 @@ def main():
 
     processed = 0
     first_page_time = None  # Track the processing time of the first successfully completed OCR page in this run
+    repetition_triggered_images = []  # Track images that triggered the repetition loop detection
+    garbage_images = []  # Track images whose OCR result is clearly not a real article
     for idx, img_name in enumerate(images, start=1):
         img_path = os.path.join(book_dir, img_name)
         base_name = os.path.splitext(img_name)[0]
@@ -200,7 +292,7 @@ def main():
                     print(f"📖 [{idx}/{len(images)}] Processing '{img_name}' (Adaptive timeout: {current_timeout:.1f}s)…")
 
                 start = time.time()
-                raw_text = perform_ocr_with_api(img_path, current_timeout)
+                raw_text, loop_detected = perform_ocr_with_api(img_path, current_timeout)
                 elapsed = time.time() - start
                 print(f"   ⏱️ OCR completed in {elapsed:.2f} seconds.")
 
@@ -210,15 +302,65 @@ def main():
                     print(f"   ℹ️ First page baseline time set to {first_page_time:.2f}s. Subsequent timeouts: {first_page_time * 2:.2f}s.")
 
                 cleaned = clean_ocr_text(raw_text)
+                if args.rtl:
+                    # 對中文直排（從右到左）排版，將提取的行順序在 Python 端進行完全逆轉
+                    lines = cleaned.split('\n')
+                    lines.reverse()
+                    cleaned = '\n'.join(lines)
+
+                # --- Garbage text detection ---
+                is_garbage, garbage_reason = is_garbage_text(cleaned)
+                if is_garbage:
+                    print(f"   🚨 [垃圾偵測警示] 此頁辨識結果疑似無效！原因：{garbage_reason}")
+                    print(f"      📄 對應文字檔：{out_txt}")
+                    garbage_images.append((img_name, out_txt, garbage_reason))
+
                 with open(out_txt, "w", encoding="utf-8") as f:
                     f.write(cleaned)
                 processed += 1
+
+                if loop_detected:
+                    repetition_triggered_images.append(img_name)
+
                 break  # success, move to next page
             except (TimeoutError, Exception) as e:
                 print("\n🚨 OCR failed or timed out!", e)
                 print("Please ensure Ollama is running, then press [Enter] to retry this page…")
                 input()
                 print("🔁 Retrying…")
+
+    # Unified pre-merge warning block: consolidate all issues needing manual review
+    needs_review = []
+
+    for img in repetition_triggered_images:
+        base = os.path.splitext(img)[0]
+        txt_file = os.path.join(out_folder, f"{base}.txt")
+        needs_review.append((img, txt_file, "死循環截斷（內容可能不完整）"))
+
+    for img, txt_file, reason in garbage_images:
+        # Avoid double-listing if an image was also caught by repetition detection
+        if not any(img == r[0] for r in needs_review):
+            needs_review.append((img, txt_file, reason))
+
+    if needs_review:
+        print("\n" + "="*60)
+        print("🚨  以下圖檔的 OCR 結果需要您手動確認或修正後才能合併：")
+        print()
+        for img, txt_file, reason in needs_review:
+            print(f"   🖼️  {img}")
+            print(f"       原因：{reason}")
+            print(f"       對應文字檔：{txt_file}")
+            print()
+        print("💡  建議您現在手動開啟上述的文字檔，參考原圖補齊或修正其內容。")
+        print("="*60 + "\n")
+
+        while True:
+            resp = input("👉 請在手動修正完成後，輸入 'OK' (不區分大小寫) 進行最終合併：").strip()
+            if resp.upper() == "OK":
+                print("   [OK 收到，即將開始進行最終文字合併。]\n")
+                break
+            else:
+                print("❌ 輸入內容不正確。請輸入 'OK' 以確認繼續。")
 
     # Merge all pages (including those already existed)
     final_path = os.path.join(".", f"{args.book_id}.txt")
