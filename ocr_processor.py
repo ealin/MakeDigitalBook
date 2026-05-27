@@ -73,7 +73,7 @@ def has_repetition_loop(text: str, max_detect_len: int = 30, min_repeats: int = 
             return True
     return False
 
-def is_garbage_text(text: str) -> tuple[bool, str]:
+def is_garbage_text(text: str, is_english_book: bool = False) -> tuple[bool, str]:
     """Detect whether the OCR output is clearly not a real article.
     Returns (is_garbage, reason_string).
     Checks performed:
@@ -102,11 +102,12 @@ def is_garbage_text(text: str) -> tuple[bool, str]:
     total_alpha = len(re.findall(r'[a-zA-Z]', stripped))
     total_meaningful = len(re.findall(r'[^\s\n\r]', stripped))
 
-    if total_meaningful > 20 and chinese_chars == 0 and total_alpha > 20:
-        return True, "辨識結果為純英文（無任何中文字），疑似模型幻覺或圖片載入失敗"
+    if not is_english_book:
+        if total_meaningful > 20 and chinese_chars == 0 and total_alpha > 20:
+            return True, "辨識結果為純英文（無任何中文字），疑似模型幻覺或圖片載入失敗"
 
-    if total_meaningful > 30 and chinese_chars > 0 and total_alpha / max(chinese_chars, 1) > 5:
-        return True, f"英文字母數量（{total_alpha}）遠超中文字數（{chinese_chars}），疑似模型描述圖片而非提取文字"
+        if total_meaningful > 30 and chinese_chars > 0 and total_alpha / max(chinese_chars, 1) > 5:
+            return True, f"英文字母數量（{total_alpha}）遠超中文字數（{chinese_chars}），疑似模型描述圖片而非提取文字"
 
     # 4. Extremely short meaningful content
     if total_meaningful < 10:
@@ -212,6 +213,8 @@ def main():
                         help="Run internal unit tests and exit")
     parser.add_argument("--rtl", action="store_true",
                         help="Process vertical Chinese text (read from right to left)")
+    parser.add_argument("--english", action="store_true",
+                        help="Process an English book (disables pure-English hallucination warnings)")
     args = parser.parse_args()
 
     if args.test:
@@ -309,7 +312,7 @@ def main():
                     cleaned = '\n'.join(lines)
 
                 # --- Garbage text detection ---
-                is_garbage, garbage_reason = is_garbage_text(cleaned)
+                is_garbage, garbage_reason = is_garbage_text(cleaned, args.english)
                 if is_garbage:
                     print(f"   🚨 [垃圾偵測警示] 此頁辨識結果疑似無效！原因：{garbage_reason}")
                     print(f"      📄 對應文字檔：{out_txt}")
