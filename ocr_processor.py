@@ -38,19 +38,24 @@ def clean_ocr_text(text: str) -> str:
     ]
     for phrase in intro_phrases:
         text = re.sub(phrase, '', text, flags=re.IGNORECASE | re.MULTILINE)
-    # 3. Remove status‑bar noise (time, battery, UI tokens) – only in top/bottom lines
+    # 3. Remove status‑bar noise (time, battery, UI tokens), book titles, and page numbers – only in top/bottom lines
+    text = text.strip()
     lines = text.split('\n')
     cleaned_lines = []
     time_pattern = re.compile(r'^\s*(AM|PM)?\s*\d{1,2}:\d{2}\s*$', re.IGNORECASE)
     battery_pattern = re.compile(r'^\s*\d{1,3}%\s*$')
     ui_pattern = re.compile(r'^\s*(AA|[‹›<>|])\s*$', re.IGNORECASE)
-    a4_pattern = re.compile(r'^\s*A4\s*$', re.IGNORECASE)  # NEW: single line "A4"
+    a4_pattern = re.compile(r'^\s*A4\s*$', re.IGNORECASE)  # single line "A4"
+    book_title_pattern = re.compile(r'^\s*(十二大密意|藥師佛的12大願)\s*$')
+    page_num_pattern = re.compile(r'^\s*\d+\s*$')
+
     for i, line in enumerate(lines):
-        is_top_or_bottom = (i < 5) or (i >= len(lines) - 5)
+        is_top_or_bottom = (i < 8) or (i >= len(lines) - 8)
         stripped = line.strip()
         if is_top_or_bottom:
             if (time_pattern.match(stripped) or battery_pattern.match(stripped) or
-                ui_pattern.match(stripped) or a4_pattern.match(stripped)):
+                ui_pattern.match(stripped) or a4_pattern.match(stripped) or
+                book_title_pattern.match(stripped) or page_num_pattern.match(stripped)):
                 continue  # drop this line
         cleaned_lines.append(line)
     result = '\n'.join(cleaned_lines).strip()
@@ -170,12 +175,21 @@ def run_unit_tests():
                 "台灣AI大未來 - 10.jpg", "台灣AI大未來 - 100.jpg"]
     assert sorted_files == expected, f"Sorting failed: {sorted_files}"
     print("   [PASS] Filename sorting works.")
-    # Noise filtering test – includes the new "A4" line
-    raw = """```markdown\nAM2:07\n73%\nAA\nA4\n技術視角，見證這波生成式AI如何覆舊有的AI思潮流。\n```"""
+    # Noise filtering test – includes the new "A4" line and footer/page numbers
+    raw = """```markdown
+AM2:07
+73%
+AA
+A4
+技術視角，見證這波生成式AI如何覆舊有的AI思潮流。
+十二大密意
+
+1
+```"""
     cleaned = clean_ocr_text(raw)
     expected_clean = "技術視角，見證這波生成式AI如何覆舊有的AI思潮流。"
     assert cleaned == expected_clean, f"Cleanup failed: {cleaned}"
-    print("   [PASS] Noise filtering (including A4) works.")
+    print("   [PASS] Noise filtering (including A4, book title, page numbers) works.")
     print("🎉 All unit tests passed!\n")
 
 def merge_texts(book_id: str, out_txt_dir: str, sorted_filenames: list, final_out_path: str):
