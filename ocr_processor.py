@@ -46,7 +46,7 @@ def clean_ocr_text(text: str) -> str:
     battery_pattern = re.compile(r'^\s*\d{1,3}%\s*$')
     ui_pattern = re.compile(r'^\s*(AA|[‹›<>|])\s*$', re.IGNORECASE)
     a4_pattern = re.compile(r'^\s*A4\s*$', re.IGNORECASE)  # single line "A4"
-    book_title_pattern = re.compile(r'^\s*(十二大密意|藥師佛的12大願)\s*$')
+    book_title_pattern = re.compile(r'^\s*(十二大密意|藥師佛的12大願|雷浩斯教你.*(存好股|好股).*)\s*$')
     page_num_pattern = re.compile(r'^\s*\d+\s*$')
 
     for i, line in enumerate(lines):
@@ -229,6 +229,8 @@ def main():
                         help="Process vertical Chinese text (read from right to left)")
     parser.add_argument("--english", action="store_true",
                         help="Process an English book (disables pure-English hallucination warnings)")
+    parser.add_argument("--pages", type=str, default=None,
+                        help="Comma-separated list of specific page numbers to process (e.g. 40,128,258)")
     args = parser.parse_args()
 
     if args.test:
@@ -255,6 +257,15 @@ def main():
         sys.exit(1)
     images.sort(key=extract_page_number)
     print(f"🔢 Detected {len(images)} image files.")
+ 
+    # Apply specific pages list if given
+    if args.pages is not None:
+        target_pages = [int(p.strip()) for p in args.pages.split(",")]
+        images = [img for img in images if extract_page_number(img) in target_pages]
+        if not images:
+            print(f"❌ No images found matching pages: {args.pages}")
+            sys.exit(1)
+        print(f"🚦 Processing only specific pages: {target_pages}. Count: {len(images)}")
 
     # Apply start page if given
     if args.start is not None:
