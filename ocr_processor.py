@@ -46,7 +46,7 @@ def clean_ocr_text(text: str) -> str:
     battery_pattern = re.compile(r'^\s*\d{1,3}%\s*$')
     ui_pattern = re.compile(r'^\s*(AA|[‹›<>|])\s*$', re.IGNORECASE)
     a4_pattern = re.compile(r'^\s*A4\s*$', re.IGNORECASE)  # single line "A4"
-    book_title_pattern = re.compile(r'^\s*(十二大密意|藥師佛的12大願|雷浩斯教你.*(存好股|好股).*)\s*$')
+    book_title_pattern = re.compile(r'^\s*(十二大密意|藥師佛的12大願|雷浩斯教你.*(存好股|好股).*|永不崩盤.*)\s*$')
     page_num_pattern = re.compile(r'^\s*\d+\s*$')
 
     for i, line in enumerate(lines):
